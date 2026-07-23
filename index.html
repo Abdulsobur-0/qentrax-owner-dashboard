@@ -157,11 +157,29 @@
   </header>
 
   <main>
+    <div class="panel" style="margin-bottom:1rem;">
+      <div class="toolbar" style="margin-bottom:0;">
+        <label style="margin:0;">Viewing:</label>
+        <input type="date" id="dateFilter" style="padding:.5rem .7rem;border:1px solid var(--border);border-radius:7px;">
+        <button class="ghost" id="todayBtn" style="margin-left:0;">Today</button>
+      </div>
+    </div>
+
     <div class="metric-grid">
-      <div class="metric-card"><div class="label">Total sales (synced)</div><div class="value" id="mTotalSales">-</div></div>
+      <div class="metric-card"><div class="label">Revenue (selected day)</div><div class="value" id="mTotalSales">-</div></div>
+      <div class="metric-card"><div class="label">Profit (selected day)</div><div class="value" id="mProfit">-</div></div>
       <div class="metric-card"><div class="label">Transactions</div><div class="value" id="mCount">-</div></div>
-      <div class="metric-card"><div class="label">Total expenses</div><div class="value" id="mExpenses">-</div></div>
-      <div class="metric-card"><div class="label">Stock lines tracked</div><div class="value" id="mStock">-</div></div>
+      <div class="metric-card"><div class="label">Expenses (selected day)</div><div class="value" id="mExpenses">-</div></div>
+    </div>
+
+    <div class="panel">
+      <h2>Top performing product</h2>
+      <div id="topProductWrap"><p class="empty">No data yet.</p></div>
+    </div>
+
+    <div class="panel">
+      <h2>Stock movement (added / reduced)</h2>
+      <div id="stockMovementsWrap"><p class="empty">No data yet.</p></div>
     </div>
 
     <div class="panel">
@@ -270,23 +288,35 @@ document.getElementById('signOutBtn').addEventListener('click', async () => {
 
 document.getElementById('refreshBtn').addEventListener('click', loadAllData);
 
+let allItems = [];
+let allMovements = [];
+let selectedDate = new Date().toISOString().slice(0, 10);
+
+function dateOf(iso) { return iso ? iso.slice(0, 10) : null; }
+
 async function loadAllData() {
   const refreshBtn = document.getElementById('refreshBtn');
   refreshBtn.textContent = 'Refreshing...';
 
-  const [salesRes, expensesRes, stockRes, cashierRes] = await Promise.all([
-    client.from('sales_sync').select('*').order('sold_at', { ascending: false }).limit(500),
+  const [salesRes, itemsRes, expensesRes, stockRes, cashierRes, movementsRes] = await Promise.all([
+    client.from('sales_sync').select('*').order('sold_at', { ascending: false }).limit(1000),
+    client.from('sale_items_sync').select('*').limit(3000),
     client.from('expenses_sync').select('*').order('expense_date', { ascending: false }).limit(200),
     client.from('stock_snapshot').select('*').order('product_name', { ascending: true }),
     client.from('cashier_summary_sync').select('*').order('sales_total', { ascending: false }),
+    client.from('stock_movements_sync').select('*').order('moved_at', { ascending: false }).limit(1000),
   ]);
 
   allSales = salesRes.data || [];
+  allItems = itemsRes.data || [];
   allExpenses = expensesRes.data || [];
   allStock = stockRes.data || [];
   allCashiers = cashierRes.data || [];
+  allMovements = movementsRes.data || [];
 
   renderMetrics();
+  renderTopProduct();
+  renderStockMovements();
   renderChart();
   renderCashierTable();
   renderSalesTable();
@@ -297,13 +327,71 @@ async function loadAllData() {
   refreshBtn.textContent = 'Refresh';
 }
 
+function salesForDate(d) {
+  return allSales.filter(s => dateOf(s.sold_at) === d);
+}
+
+function itemsForDate(d) {
+  const receiptsToday = new Set(salesForDate(d).map(s => s.receipt_number));
+  return allItems.filter(i => receiptsToday.has(i.receipt_number));
+}
+
 function renderMetrics() {
-  const totalSales = allSales.reduce((s, r) => s + Number(r.total || 0), 0);
-  const totalExpenses = allExpenses.reduce((s, r) => s + Number(r.amount || 0), 0);
-  document.getElementById('mTotalSales').textContent = currency(totalSales);
-  document.getElementById('mCount').textContent = allSales.length.toLocaleString();
-  document.getElementById('mExpenses').textContent = currency(totalExpenses);
-  document.getElementById('mStock').textContent = allStock.length.toLocaleString();
+  const daySales = salesForDate(selectedDate);
+  const dayItems = itemsForDate(selectedDate);
+  const dayExpenses = allExpenses.filter(e => e.expense_date === selectedDate);
+
+  const revenue = daySales.reduce((s, r) => s + Number(r.total || 0), 0);
+  const profit = dayItems.reduce((s, i) => {
+    const cost = Number(i.unit_cost || 0) * Number(i.quantity || 0);
+    return s + (Number(i.line_total || 0) - cost);
+  }, 0);
+  const expensesTotal = dayExpenses.reduce((s, r) => s + Number(r.amount || 0), 0);
+
+  document.getElementById('mTotalSales').textContent = currency(revenue);
+  document.getElementById('mProfit').textContent = currency(profit);
+  document.getElementById('mCount').textContent = daySales.length.toLocaleString();
+  document.getElementById('mExpenses').textContent = currency(expensesTotal);
+}
+
+function renderTopProduct() {
+  const dayItems = itemsForDate(selectedDate);
+  const totals = {};
+  dayItems.forEach(i => {
+    const key = i.product_name || 'Unknown';
+    totals[key] = (totals[key] || 0) + Number(i.quantity || 0);
+  });
+  const ranked = Object.entries(totals).sort((a, b) => b[1] - a[1]);
+  const wrap = document.getElementById('topProductWrap');
+  if (ranked.length === 0) { wrap.innerHTML = '<p class="empty">No sales on this day.</p>'; return; }
+  let html = '<table><thead><tr><th>Product</th><th class="num">Units sold</th></tr></thead><tbody>';
+  ranked.slice(0, 10).forEach(([name, qty], idx) => {
+    html += '<tr><td>' + (idx === 0 ? '<span class="pill">Top</span> ' : '') + escapeHtml(name) + '</td><td class="num">' + qty + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
+}
+
+function renderStockMovements() {
+  const dayMovements = allMovements.filter(m => dateOf(m.moved_at) === selectedDate);
+  const totals = {};
+  dayMovements.forEach(m => {
+    const key = m.product_name || 'Unknown';
+    if (!totals[key]) totals[key] = { added: 0, reduced: 0 };
+    const change = Number(m.quantity_change || 0);
+    if (change > 0) totals[key].added += change;
+    else totals[key].reduced += Math.abs(change);
+  });
+  const wrap = document.getElementById('stockMovementsWrap');
+  const entries = Object.entries(totals);
+  if (entries.length === 0) { wrap.innerHTML = '<p class="empty">No stock changes on this day.</p>'; return; }
+  let html = '<table><thead><tr><th>Product</th><th class="num">Added</th><th class="num">Reduced</th><th class="num">Net</th></tr></thead><tbody>';
+  entries.forEach(([name, t]) => {
+    const net = t.added - t.reduced;
+    html += '<tr><td>' + escapeHtml(name) + '</td><td class="num" style="color:#0f4c46">' + (t.added ? '+' + t.added : '-') + '</td><td class="num" style="color:#b4382a">' + (t.reduced ? '-' + t.reduced : '-') + '</td><td class="num"><b>' + (net > 0 ? '+' : '') + net + '</b></td></tr>';
+  });
+  html += '</tbody></table>';
+  wrap.innerHTML = html;
 }
 
 function renderChart() {
@@ -415,6 +503,21 @@ function escapeHtml(str) {
 
 document.getElementById('salesSearch').addEventListener('input', (e) => renderSalesTable(e.target.value));
 document.getElementById('stockSearch').addEventListener('input', (e) => renderStockTable(e.target.value));
+
+document.getElementById('dateFilter').value = selectedDate;
+document.getElementById('dateFilter').addEventListener('change', (e) => {
+  selectedDate = e.target.value;
+  renderMetrics();
+  renderTopProduct();
+  renderStockMovements();
+});
+document.getElementById('todayBtn').addEventListener('click', () => {
+  selectedDate = new Date().toISOString().slice(0, 10);
+  document.getElementById('dateFilter').value = selectedDate;
+  renderMetrics();
+  renderTopProduct();
+  renderStockMovements();
+});
 
 client.auth.onAuthStateChange(async (event, session) => {
   if (event === 'PASSWORD_RECOVERY') {
