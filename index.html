@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
@@ -415,6 +415,21 @@ function escapeHtml(str) {
 
 document.getElementById('salesSearch').addEventListener('input', (e) => renderSalesTable(e.target.value));
 document.getElementById('stockSearch').addEventListener('input', (e) => renderStockTable(e.target.value));
+
+client.auth.onAuthStateChange(async (event, session) => {
+  if (event === 'PASSWORD_RECOVERY') {
+    const newPassword = prompt('Enter your new password (at least 6 characters):');
+    if (newPassword && newPassword.length >= 6) {
+      const { error } = await client.auth.updateUser({ password: newPassword });
+      if (error) {
+        alert('Could not update password: ' + error.message);
+      } else {
+        alert('Password updated. You are now signed in.');
+        showDashboard(session);
+      }
+    }
+  }
+});
 
 checkSession();
 </script>
